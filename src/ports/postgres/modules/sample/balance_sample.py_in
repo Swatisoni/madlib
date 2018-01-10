@@ -71,17 +71,17 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 Random undersample without replacement.
                 Randomly order the rows and give a unique (per class)
                 identifier to each one.
-                SELECT rows that have identifiers under the target limit.
+                Select rows that have identifiers under the target limit.
             """
-            __undersampling_with_no_replacement(source_table, output_table, class_col,
+            _undersampling_with_no_replacement(source_table, output_table, class_col,
                     class_sizes, output_table_size, grouping_cols, with_replacement,
                     class_counts, source_table_columns)
 
-            __delete_temp_views(temp_views)
+            _delete_temp_views(temp_views)
             return
 
         """
-            Create views for actual and desired sample sizes of classes
+            Create views for true and desired sample sizes of classes
         """
         extra_samples = True
         sampling_with_comma_delimited_class_sizes = class_sizes.find(':') > 0
@@ -92,12 +92,12 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 comman-delimited list of class_sizes
                 and/or output_table_size
             """
-            class_sizes, extra_samples = _check_formatting_and_values(class_sizes, source_table,
+            class_sizes, extra_samples = _validate_format_and_values(class_sizes, source_table,
                             class_col, output_table_size, class_counts)
 
-            ## the following should execute only when
-            ## a. output_table_size is null
-            ## b. desired_sample_sizes <= output_table_size
+            """
+                 Only valid condition for sampling is desired_sample_sizes <= output_table_size
+            """
             temp_views.extend(_create_desired_and_actual_sampling_views(class_counts,
                     desired_sample_per_class, desired_counts
                     , source_table, output_table, class_col
@@ -113,16 +113,16 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 , source_table, output_table, class_col, class_sizes,
                 output_table_size))
 
-        oversampling, nosampling = False,  False
-        desired_undersample_class_counts = defaultdict(str)
+        oversampling_specific_classes, nosampling = False,  False
+        desired_undersample_class_sizes = defaultdict(str)
 
-        # class_sizes = '3:8,5:4,4:28'
         if sampling_with_comma_delimited_class_sizes or class_sizes.lower() == 'uniform':
-            oversampling = plpy.execute("""
+
+            oversampling_specific_classes = plpy.execute("""
                 SELECT * FROM {desired_sample_per_class}
                 WHERE category = 'oversample'
                 """.format(**locals())).nrows() > 0
-            if oversampling:
+            if oversampling_specific_classes:
                 with_replacement = True
 
             undersampling_res = plpy.execute("""
@@ -130,21 +130,25 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                         as undersample_set FROM {desired_sample_per_class}
                 WHERE category = 'undersample'
                 """.format(**locals()))
-
             if undersampling_res.nrows() > 0 and undersampling_res[0]['undersample_set'] is not None:
                 for val in undersampling_res[0]['undersample_set']:
-                    desired_undersample_class_counts[val.split(':')[0]] = val.split(':')[1]
+                    desired_undersample_class_sizes[val.split(':')[0]] = val.split(':')[1]
 
             nosampling = plpy.execute("""
                 SELECT * FROM {desired_sample_per_class} WHERE category = 'nosample'
                 """.format(**locals())).nrows() > 0
 
         if class_sizes.lower() == 'oversample':
+            """
+                oversampling with replacement
+            """
             with_replacement = True
             func_name = 'max'
 
         if class_sizes.lower() == 'undersample' and with_replacement:
-            # undersampling with replacement.
+            """
+                Undersampling with replacement.
+            """
             func_name = 'min'
 
         if with_replacement:
@@ -164,7 +168,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 FROM
                     {source_table}
                 """.format(**locals())
-            if oversampling:
+            if oversampling_specific_classes:
                 select_oversample_classes = """ WHERE {class_col}::text in
                             (SELECT classes
                             FROM {desired_sample_per_class}
@@ -176,7 +180,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 Create independent random values
                 for each class that has a different row count than the target
             """
-            if oversampling:
+            if oversampling_specific_classes:
                 random_targetclass_size_sample_number_gen_sql = """
                 SELECT
                     {desired_sample_per_class}.classes,
@@ -221,7 +225,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 (f1.{class_col}::text = f2.classes)
                 """.format(**locals())
 
-            if not oversampling:
+            if not oversampling_specific_classes:
                 """
                     Find classes with target number of rows
                 """
@@ -250,7 +254,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                     """.format(**locals())
                 plpy.execute(output_sql)
 
-                __delete_temp_views(temp_views)
+                _delete_temp_views(temp_views)
                 return
 
         nosample_classset_sql = """
@@ -265,7 +269,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                     """.format(**locals())
 
         undersampling_classset_sql = ''
-        if len(desired_undersample_class_counts) > 0:
+        if len(desired_undersample_class_sizes) > 0:
             """
                 Use union all to presenve the repeated samples of oversamples.
             """
@@ -279,17 +283,17 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                             source_table=source_table,
                             class_col=class_col,
                             limit_bound=clas_limit,
-                            clas=clas) for clas, clas_limit in desired_undersample_class_counts.iteritems())
+                            clas=clas) for clas, clas_limit in desired_undersample_class_sizes.iteritems())
             undersampling_classset_sql = ' UNION ALL ' + undersampling_classset_sql
 
-        oversampling_classset_sql = ''
-        if oversampling:
-            oversampling_classset_sql = """
+        oversampling_specific_classes_classset_sql = ''
+        if oversampling_specific_classes:
+            oversampling_specific_classes_classset_sql = """
                     UNION ALL
                         ({sample_otherclass_set})
                         """.format(**locals())
 
-        if (oversampling or len(desired_undersample_class_counts) > 0):
+        if (oversampling_specific_classes or len(desired_undersample_class_sizes) > 0):
             """
                 Combine target and other over sampled classes
                 sample_otherclass_set
@@ -302,16 +306,16 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                     SELECT {source_table_columns}
                     FROM
                         ({nosample_classset_sql}) AS a
-                    {oversampling_classset_sql}
+                    {oversampling_specific_classes_classset_sql}
                     {undersampling_classset_sql})
                 """.format(**locals())
 
             plpy.execute(output_sql)
 
-        __delete_temp_views(temp_views)
+        _delete_temp_views(temp_views)
     return
 
-def __delete_temp_views(temp_views):
+def _delete_temp_views(temp_views):
     for temp_view in temp_views:
             plpy.execute("DROP VIEW IF EXISTS {0} cascade".format(temp_view))
     return
@@ -319,7 +323,7 @@ def __delete_temp_views(temp_views):
 """
     Random undersample without replacement.
 """
-def __undersampling_with_no_replacement(source_table, output_table, class_col,
+def _undersampling_with_no_replacement(source_table, output_table, class_col,
         class_sizes, output_table_size, grouping_cols, with_replacement,
         class_counts, source_table_columns):
 
@@ -391,7 +395,7 @@ class UniqueDict(dict):
         else:
             plpy.error("Sample: Same class specified multiple times in class_sizes")
 
-def __check_value_type(value):
+def _check_value_type(value):
     try:
         float(value)
     except ValueError:
@@ -416,7 +420,7 @@ specified in class_sizes
 6. Checks if same class is specified multiple times in class_sizes
 
 """
-def _check_formatting_and_values(class_sizes, source_table, class_col,
+def _validate_format_and_values(class_sizes, source_table, class_col,
                     output_table_size, class_counts):
 
     mod_class_sizes = ''
@@ -437,9 +441,9 @@ def _check_formatting_and_values(class_sizes, source_table, class_col,
 
     for x in class_sizes_arr:
         val = x.split(':')
-        valueType = __check_value_type(val[1])
+        valueType = _check_value_type(val[1])
         # Following error type is invalidated by Frank as of 29th Dec.
-        # if __check_value_type(val[1].strip(), valueType) != valueType:
+        # if _check_value_type(val[1].strip(), valueType) != valueType:
             #plpy.error("Sample: Specify either fractions or whole number values for ALL classes.")
         fraction_value_sum += valueType(val[1]) if valueType == float else 0.0
         numeric_value_sum += valueType(val[1]) if valueType != float else 0
@@ -812,10 +816,6 @@ def _validate_strs (source_table, output_table, class_col, class_sizes,
     _assert(class_sizes in ('oversample', 'undersample', 'uniform')
             or (class_sizes.find(':') > 0),
             "Sample: Invalid class size ({class_sizes})!".format(**locals()))
-
-    # _assert(not(class_sizes.lower() == 'oversample' and
-    #                 with_replacement is False),
-    #     "Sample: Cannot use without replacement with oversampling.")
 
     _assert(not(class_sizes.lower() == 'oversample' and output_table_size),
         "Sample: Cannot set output_table_size with oversampling.")
