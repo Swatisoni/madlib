@@ -507,7 +507,7 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
 
         if output_table_size == numeric_value_sum:
             # Do not sample other classes
-            return class_sizes, False
+            return class_sizes, not include_unsampled_classes
 
         # Sample remaining classes uniformly with target table size
         return class_sizes, include_unsampled_classes
@@ -517,7 +517,7 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
     """
     if Fraction(fraction_value_sum) == Fraction(1.0):
         # Do not sample other classes
-        return _compute_class_sizes(cs_dict, total_table_size)[0], False
+        return _compute_class_sizes(cs_dict, total_table_size)[0], not include_unsampled_classes
 
     """
         Compute sample classs size when both fractions and whole numbers are mentioned in class_size comma-delimited string
@@ -544,12 +544,12 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
 
             if numeric_value_sum == 0:
                 # A rare case happens WHEN there is ONLY one class present in class_col
-                return _compute_class_sizes(cs_dict, total_table_size)[0], False
+                return _compute_class_sizes(cs_dict, total_table_size)[0], not include_unsampled_classes
 
             # Compute total_desired_sample_size as x
             x = math.ceil(float(numeric_value_sum) / y)
-            class_size,_ = _compute_class_sizes(cs_dict, x)
-            return class_size, True
+            class_size, _ = _compute_class_sizes(cs_dict, x)
+            return class_size, include_unsampled_classes
 
         # if output_table_size is given:
         output_table_size = float(output_table_size)
@@ -562,12 +562,12 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
         if total_desired_sample_size == output_table_size:
             # no need to sample other classes
             # fractions should be multiplied by output_table_size to get proper whole number values
-            return class_size, False
+            return class_size, not include_unsampled_classes
 
         if total_desired_sample_size < output_table_size:
             # Sample other classes uniformly
             # fractions should be multiplied by output_table_size to get proper whole number values
-            return class_size, True
+            return class_size, include_unsampled_classes
 
 def _compute_class_sizes(cs_dict, x):
     class_size = ''
