@@ -83,7 +83,11 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
         """
             Create views for true and desired sample sizes of classes
         """
-        extra_samples = True
+        """
+            include_unsampled_classes tracks is unsampled classes are desired or not.
+            include_unsampled_classes is always true in output_table_size Null cases but changes given values of desired sample class sizes in comma-delimited classsize paramter.
+        """
+        include_unsampled_classes = True
         sampling_with_comma_delimited_class_sizes = class_sizes.find(':') > 0
 
         if sampling_with_comma_delimited_class_sizes:
@@ -92,8 +96,8 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 comman-delimited list of class_sizes
                 and/or output_table_size
             """
-            class_sizes, extra_samples = _validate_format_and_values(class_sizes, source_table,
-                            class_col, output_table_size, class_counts)
+            class_sizes, include_unsampled_classes = _validate_format_and_values(class_sizes, source_table,
+                            class_col, output_table_size, class_counts, include_unsampled_classes)
 
             """
                  Only valid condition for sampling is desired_sample_sizes <= output_table_size
@@ -101,7 +105,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
             temp_views.extend(_create_desired_and_actual_sampling_views(class_counts,
                     desired_sample_per_class, desired_counts
                     , source_table, output_table, class_col
-                    , class_sizes, output_table_size, extra_samples))
+                    , class_sizes, output_table_size, include_unsampled_classes))
 
         if class_sizes.lower() == 'uniform':
             """
@@ -113,7 +117,7 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 , source_table, output_table, class_col, class_sizes,
                 output_table_size))
 
-        oversampling_specific_classes, nosampling = False,  False
+        oversampling_specific_classes = False
         desired_undersample_class_sizes = defaultdict(str)
 
         if sampling_with_comma_delimited_class_sizes or class_sizes.lower() == 'uniform':
@@ -133,10 +137,6 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
             if undersampling_res.nrows() > 0 and undersampling_res[0]['undersample_set'] is not None:
                 for val in undersampling_res[0]['undersample_set']:
                     desired_undersample_class_sizes[val.split(':')[0]] = val.split(':')[1]
-
-            nosampling = plpy.execute("""
-                SELECT * FROM {desired_sample_per_class} WHERE category = 'nosample'
-                """.format(**locals())).nrows() > 0
 
         if class_sizes.lower() == 'oversample':
             """
@@ -257,6 +257,9 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                 _delete_temp_views(temp_views)
                 return
 
+        """
+            Unsampled classes
+        """
         nosample_classset_sql = """
             SELECT
                 {source_table_columns}
@@ -267,12 +270,11 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                  FROM {desired_sample_per_class}
                  WHERE category like 'nosample')
                     """.format(**locals())
-
+        """
+            Union all Undersampled classes
+        """
         undersampling_classset_sql = ''
         if len(desired_undersample_class_sizes) > 0:
-            """
-                Use union all to presenve the repeated samples of oversamples.
-            """
             undersampling_classset_sql = ' UNION ALL'.join("""
                 (SELECT {source_table_columns}
                 FROM {source_table}
@@ -286,6 +288,9 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
                             clas=clas) for clas, clas_limit in desired_undersample_class_sizes.iteritems())
             undersampling_classset_sql = ' UNION ALL ' + undersampling_classset_sql
 
+        """
+            Union all Oversampled classes
+        """
         oversampling_specific_classes_classset_sql = ''
         if oversampling_specific_classes:
             oversampling_specific_classes_classset_sql = """
@@ -295,10 +300,9 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
 
         if (oversampling_specific_classes or len(desired_undersample_class_sizes) > 0):
             """
-                Combine target and other over sampled classes
-                sample_otherclass_set
+                Combine all sampled and/or unsampled classes
             """
-            if not extra_samples:
+            if not include_unsampled_classes:
                 nosample_classset_sql.replace('nosample', '')
 
             output_sql = """
@@ -315,6 +319,9 @@ def balance_sample(schema_madlib, source_table, output_table, class_col,
         _delete_temp_views(temp_views)
     return
 
+"""
+    Delete all temp views
+"""
 def _delete_temp_views(temp_views):
     for temp_view in temp_views:
             plpy.execute("DROP VIEW IF EXISTS {0} cascade".format(temp_view))
@@ -383,23 +390,35 @@ def _undersampling_with_no_replacement(source_table, output_table, class_col,
             {minority_sql} )""".format(**locals())
     plpy.execute(output_sql)
 
-
+"""
+    Captures cases where classes are specified multiple time in comma-delimited string.
+    e.g. class_sizes = '5:6,5:4'
+"""
 class UniqueDict(dict):
-    def __setitem__(self, key, value):
-        if key not in self:
-            # float(value).is_integer() ensures only whole numbers.
-            if (value > 0.0 or value < 1.0) or (value >= 1.0 and float(value).is_integer()):
-                dict.__setitem__(self, key, value)
+    def __setitem__(self, classkey, class_size):
+        if classkey not in self:
+            """
+             float(class_size).is_integer() ensures only whole numbers are added as
+             class's sample size
+            """
+            if (class_size > 0.0 or class_size < 1.0) or (class_size >= 1.0 and float(class_size).is_integer()):
+                dict.__setitem__(self, classkey, class_size)
             else:
-                plpy.error("Sample: Value should be between (0.0,1.0) or value is a whole number greater then 1")
+                plpy.error("Sample: Sample size should be a fraction between (0.0,1.0) or a whole number greater than 1")
         else:
-            plpy.error("Sample: Same class specified multiple times in class_sizes")
+            plpy.error("Sample: Repeated classes in class_sizes")
 
+"""
+    Check if the class sizes (passed as strings) are alphanumeric, float or whole numbers.
+    Error out on alphanumeric values.
+    e.g. class_sizes = '3:a,5:b
+    Returns type of the size as int or float.
+"""
 def _check_value_type(value):
     try:
         float(value)
     except ValueError:
-        raise ValueError("Sample: Specify either fractions or whole numbers for each class sample size.")
+        plpy.error("Sample: Specify either fractions (0.0,1.0) or whole numbers for class sample size.")
 
     if re.match("^\d+?\.\d+?$", value) is not None and not float(value).is_integer():
         valueType = float
@@ -407,31 +426,21 @@ def _check_value_type(value):
         valueType = int
     return valueType
 
+
 """
-
-Checks the format of classes and values specified as
-comman delimited string.
-1. Checks if the classes specified are present in the source table.
-2. Checks if fractions sum to 1.0 and CASEs WHERE it is allowed.
-3. Checks for output_table_size < total desired size of the classes
-specified in class_sizes
-4. Checks for only fractions or whole numbers specified in sample sizes
-5. Checks for sample sizes should be between (0.0,1.0) or value is a whole number greater then 1
-6. Checks if same class is specified multiple times in class_sizes
-
+    Checks the format and values of classes and their respective sizes specified in comman-delimited string.
+    1. Checks if the classes specified are present in the source table.
+    2. Checks for total sample size to be between (0.0,1.0]
+    3. Checks for output_table_size < total desired size of the classes
+    specified in class_sizes
+    4. Checks for cases when only fractions or whole numbers specified in sample sizes
+    5. Checks for value is a whole number greater then 1
+    6. Checks if same class is specified multiple times in class_sizes
+    7. Checks is classes are present in class_col
 """
 def _validate_format_and_values(class_sizes, source_table, class_col,
-                    output_table_size, class_counts):
+                    output_table_size, class_counts, include_unsampled_classes):
 
-    mod_class_sizes = ''
-
-    # errors on same classes e.g class_sizes = '3:4,5:6,10:4,6:0.4,5:0.4'
-    # errors on different value types (numeric and fractions) class_sizes = '3:4,5:6,10:4,6:0.4' errors on value?
-    # ensure keys in the class_col.
-    # class_sizes = '3:4,5:6,10:4,6:4,5:4' # error duplicate keys
-    # class_sizes = '3:0.4,5:0.6,10:4,6:0.4,5:0.4' # must have same type of values
-    # class_sizes = '3:a,5:b' # error values are string
-    # class_sizes = '3:0.2,4:0.3,6:0.5'
     class_sizes_arr = class_sizes.split(',')
 
     cs_dict = UniqueDict(defaultdict())
@@ -440,18 +449,20 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
     fraction_value_sum = 0.0
 
     for x in class_sizes_arr:
-        val = x.split(':')
-        valueType = _check_value_type(val[1])
+        class_and_size = x.split(':')
+        valueType = _check_value_type(class_and_size[1])
         # Following error type is invalidated by Frank as of 29th Dec.
         # if _check_value_type(val[1].strip(), valueType) != valueType:
             #plpy.error("Sample: Specify either fractions or whole number values for ALL classes.")
-        fraction_value_sum += valueType(val[1]) if valueType == float else 0.0
-        numeric_value_sum += valueType(val[1]) if valueType != float else 0
-        cs_dict[val[0].strip()] = valueType(val[1])
+        fraction_value_sum += valueType(class_and_size[1]) if valueType == float else 0.0
+        numeric_value_sum += valueType(class_and_size[1]) if valueType != float else 0
+        cs_dict[class_and_size[0].strip()] = valueType(class_and_size[1])
 
+    """
+        Check to see if specified classes are present in the class_col
+    """
     all_classes = cs_dict.keys()
 
-    # Check to see if specified classes are present in the class_col
     all_classes = str(all_classes)[1:-1]
 
     does_all_specified_class_exists = plpy.execute("""
@@ -478,10 +489,6 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
             FROM {source_table}
         """.format(**locals()))[0]['total']
 
-    #extra_samples keeps track of keeping remaining samples as is.
-    # is always true in output_table_size Null cases
-    extra_samples = True
-
     # no fractions are present
     from fractions import Fraction
     if Fraction(fraction_value_sum) == Fraction(0.0):
@@ -489,7 +496,7 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
 
         if (not output_table_size):
             # sample others uniformly with class_sizes given
-            return class_sizes, extra_samples
+            return class_sizes, include_unsampled_classes
 
         if output_table_size < numeric_value_sum:
             plpy.error("""Sample: Output table size ({output_table_size}) must be more than total specified sample size i.e {numeric_value_sum}""".format(**locals()))
@@ -562,7 +569,9 @@ def _compute_class_sizes(cs_dict, x):
 
     return class_size[:-1], total_desired_size
 
-# create frqguency distribution of source table
+"""
+    Create view to store class counts of classes in class_col
+"""
 def _create_frequency_distribution(class_counts, source_table, class_col):
 
     grp_by = "GROUP BY {0}".format(class_col)
@@ -577,9 +586,9 @@ def _create_frequency_distribution(class_counts, source_table, class_col):
                     {grp_by})
              """.format(**locals()))
 
-# Function to create frequency counts and desired counts table.
+# Function to create sample size counts and desired counts table.
 def _create_desired_and_actual_sampling_views(class_counts, desired_sample_per_class, desired_counts
-            , source_table, output_table, class_col, class_sizes, output_table_size, extra_samples):
+            , source_table, output_table, class_col, class_sizes, output_table_size, include_unsampled_classes):
 
     if len(class_sizes.split(',')) > 1:
         values = '\',\''.join(class_sizes.split(','))
@@ -598,7 +607,7 @@ def _create_desired_and_actual_sampling_views(class_counts, desired_sample_per_c
     temp_views = [desired_counts]
     plpy.execute(create_desired_counts_sql)
 
-    if not extra_samples:
+    if not include_unsampled_classes:
         """
             No extra/other classes desired, other than the ones
             specified in the class_sizes parameter
