@@ -28,6 +28,7 @@ from collections import defaultdict
 import math
 import plpy
 import re
+from fractions import Fraction
 
 m4_changequote(`<!', `!>')
 
@@ -425,7 +426,23 @@ def _check_value_type(value):
     elif (re.match(r"[-+]?\d+$", value) is not None):
         valueType = int
     return valueType
+"""
+    Check if classes are present in class_col
+"""
+def _validate_classes(all_classes, source_table, class_col):
 
+    nonexisting_classes = plpy.execute("""
+            SELECT
+                unnest(ARRAY[{all_classes}])
+            EXCEPT
+            SELECT
+                distinct({class_col}::text)
+            FROM {source_table}
+        """.format(**locals()))
+
+    if nonexisting_classes.nrows() > 0:
+        plpy.error("""Sample: Specified classes do not exist in
+            {class_col}""".format(**locals()))
 
 """
     Checks the format and values of classes and their respective sizes specified in comman-delimited string.
@@ -461,27 +478,15 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
     """
         Check to see if specified classes are present in the class_col
     """
-    all_classes = cs_dict.keys()
+    all_classes = str(cs_dict.keys())[1:-1]
+    _validate_classes(all_classes, source_table, class_col)
 
-    all_classes = str(all_classes)[1:-1]
-
-    does_all_specified_class_exists = plpy.execute("""
-            SELECT
-                unnest(ARRAY[{all_classes}])
-            EXCEPT
-            SELECT
-                distinct({class_col}::text)
-            FROM {source_table}
-        """.format(**locals()))
-
-    if does_all_specified_class_exists.nrows() > 0:
-        plpy.error("""Sample: Specified classes do not exist in
-            {class_col}""".format(**locals()))
-
+    """
+        Error out if fraction_value_sum is greater than 1.0 or when fraction sum is 1.0 and other classes with whole numbers as class sizes are also specified.
+    """
     if fraction_value_sum > 1.0 or (fraction_value_sum == 1.0 and numeric_value_sum != 0):
-        plpy.error("""Sample: Fraction sum < 1.0, WHEN any other class is also specified as class_name:class_size-in-whole-numbers. Fraction sum can be at most 1.0.
+        plpy.error("""Sample: Fraction sum < 1.0, when any other class is also specified as class_name:class_size-in-whole-numbers. Fraction sum can be at most 1.0.
             """.format(**locals()))
-
 
     total_table_size = plpy.execute("""
             SELECT
@@ -489,46 +494,56 @@ def _validate_format_and_values(class_sizes, source_table, class_col,
             FROM {source_table}
         """.format(**locals()))[0]['total']
 
-    # no fractions are present
-    from fractions import Fraction
+    """
+        Compute class sizes when no Fractions are specified in class_sizes
+    """
     if Fraction(fraction_value_sum) == Fraction(0.0):
-        # there are no fractions present in class_sizes
-
         if (not output_table_size):
-            # sample others uniformly with class_sizes given
+            # Sample remaining classes uniformly
             return class_sizes, include_unsampled_classes
 
         if output_table_size < numeric_value_sum:
-            plpy.error("""Sample: Output table size ({output_table_size}) must be more than total specified sample size i.e {numeric_value_sum}""".format(**locals()))
+            plpy.error("""Sample: Output table size ({output_table_size}) must be more than total specified sample size i.e. {numeric_value_sum}""".format(**locals()))
 
         if output_table_size == numeric_value_sum:
-            # no need to sample other classes
+            # Do not sample other classes
             return class_sizes, False
 
-        return class_sizes, True
+        # Sample remaining classes uniformly with target table size
+        return class_sizes, include_unsampled_classes
 
-    # only fractions are present which also sum to 1.0
+    """
+        Compute class sizes when only Fractions are specified in class_sizes, which also sum to 1.0
+    """
     if Fraction(fraction_value_sum) == Fraction(1.0):
-        ## No need for sampling other classes
+        # Do not sample other classes
         return _compute_class_sizes(cs_dict, total_table_size)[0], False
 
-    # Compute class distributions for comma-delimited fractions
-    # and class_sizes with both comma-delimited fractions and
-    # comma-delimited whole number samples
+    """
+        Compute sample classs size when both fractions and whole numbers are mentioned in class_size comma-delimited string
+    """
     if Fraction(fraction_value_sum) > Fraction(0.0):
-        # if output table size is null
+
         sum_remaining_class_samples = plpy.execute("""
                 SELECT sum({class_counts}.class_count) AS remaining_classes FROM {class_counts}
                 WHERE classes not IN ({all_classes})
                 """.format(**locals()))
+        """
+            When output_table_size is Null. Use following example logic to compute desired sample sizes.
 
+            Suppose male=.4,output_table_size= NULL and let’s say there are 2 other categorical values female=10M, other=1M
+            Use the following logic to calculate 'computed' output_table_size x
+                     .4x + 10M + 1M = x
+            where x = computed output_table_size. Here x = 18.3M
+        """
         if (not output_table_size):
-
             y = 1.0 - fraction_value_sum
+
             if sum_remaining_class_samples.nrows() > 0:
                 numeric_value_sum += sum_remaining_class_samples[0]['remaining_classes']
+
             if numeric_value_sum == 0:
-                # this case happens only WHEN there is only one class present in class col
+                # A rare case happens WHEN there is ONLY one class present in class_col
                 return _compute_class_sizes(cs_dict, total_table_size)[0], False
 
             # Compute total_desired_sample_size as x
