@@ -979,10 +979,14 @@ def _validate_data_table(data_table, voc_size):
         rv[0]['size'] <= voc_size,
         """The actual size of vocabulary %d is larger than the specified %d -
            set the correct voc_size and try again""" % (rv[0]['size'], voc_size))
+    # _assert(
+    #     rv[0]['min_wordid'] <= voc_size - 1 and
+    #     rv[0]['max_wordid'] <= voc_size - 1,
+    #     """The wordid should be in the range of 0 to %d""" % (voc_size - 1))
     _assert(
-        rv[0]['min_wordid'] <= voc_size - 1 and
-        rv[0]['max_wordid'] <= voc_size - 1,
-        """The wordid should be in the range of 0 to %d""" % (voc_size - 1))
+        rv[0]['min_wordid'] <= voc_size and
+        rv[0]['max_wordid'] <= voc_size,
+        """The wordid should be in the range of 1 to %d""" % (voc_size))
     warn(
         rv[0]['size'] == voc_size,
         """Actual size of vocabulary %d is smaller than the specified %d -
